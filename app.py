@@ -1,55 +1,63 @@
 import streamlit as st
-from PIL import Image
 import torch
-import os
+import yaml
+from pathlib import Path
+from PIL import Image
 import tempfile
-from datetime import datetime
+import os
+import numpy as np
+import cv2
 
-# ==== Streamlit App Config ====
-st.set_page_config(page_title="AffoDent Oral Screening", layout="wide")
+# ==== Page config ====
+st.set_page_config(page_title="AffoDent AI Dental Screening", layout="wide")
 
 st.title("🦷 AffoDent AI Dental Lesion Detector")
-st.markdown("Upload an intraoral image, and the AI will detect lesions, caries, and more.")
+st.markdown("Upload an intraoral photo. The model will detect lesions, caries, and more.")
 
-# ==== Load YOLOv5 Model ====
+# ==== Load Model ====
 @st.cache_resource
 def load_model():
-    return torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True)
+    from yolov5.models.common import DetectMultiBackend
+    device = 'cpu'
+    model = DetectMultiBackend('best.pt', device=device)
+    return model
 
 model = load_model()
 
 # ==== Upload Image ====
-uploaded_file = st.file_uploader("Upload a dental photo (JPG/PNG)", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("📷 Upload an image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
-    img = Image.open(uploaded_file).convert('RGB')
-    st.image(img, caption="Uploaded Image", use_column_width=True)
+    image = Image.open(uploaded_file).convert('RGB')
+    img_np = np.array(image)
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
-    # Save temp image
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_img_file:
-        img.save(temp_img_file.name)
-        temp_path = temp_img_file.name
+    st.image(image, caption="Uploaded Image", use_column_width=True)
+
+    # Save image temporarily
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmpfile:
+        image_path = tmpfile.name
+        image.save(image_path)
 
     # ==== Run Inference ====
-    st.info("Analyzing image...")
-    results = model(temp_path)
+    st.info("🧠 Analyzing...")
+    results = model(image_path, size=640, augment=False, visualize=False)
+    pred = results.pred[0]
 
-    # ==== Annotated Image ====
-    st.image(results.render()[0], caption="Detected Lesions", use_column_width=True)
+    # ==== Draw Boxes ====
+    img_annotated = img_bgr.copy()
+    names = model.names
 
-    # ==== Prediction Table ====
-    st.markdown("### 📝 Detected Findings")
-    df = results.pandas().xyxy[0]
-    if df.empty:
-        st.success("✅ No visible dental lesions detected.")
+    if pred is not None and len(pred):
+        for *xyxy, conf, cls in pred:
+            label = f'{names[int(cls)]} {conf:.2f}'
+            cv2.rectangle(img_annotated, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0,255,0), 2)
+            cv2.putText(img_annotated, label, (int(xyxy[0]), int(xyxy[1])-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+        
+        st.image(cv2.cvtColor(img_annotated, cv2.COLOR_BGR2RGB), caption="🦷 Detected Issues", use_column_width=True)
+
+        st.markdown("### 🔍 Findings")
+        for *xyxy, conf, cls in pred:
+            st.write(f"🔹 **{names[int(cls)]}** — Confidence: `{conf:.2f}`")
     else:
-        for idx, row in df.iterrows():
-            st.write(f"🔹 **{row['name']}** detected at confidence {row['confidence']:.2f}")
-
-    # ==== Optional: Save Results ====
-    save_results = st.checkbox("Download annotated image")
-    if save_results:
-        annotated_path = os.path.join(tempfile.gettempdir(), f"annotated_{datetime.now().strftime('%H%M%S')}.jpg")
-        Image.fromarray(results.render()[0]).save(annotated_path)
-        with open(annotated_path, "rb") as f:
-            st.download_button("📥 Download", f, file_name="dental_result.jpg")
+        st.success("✅ No lesions, caries, or ulcers detected.")
